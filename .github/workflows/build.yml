@@ -1,0 +1,62 @@
+name: Build VideoCacheApp IPA
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools (xcodegen + ldid)
+        run: |
+          brew install xcodegen ldid
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build (unsigned for TrollStore)
+        run: |
+          xcodebuild -project VideoCacheApp.xcodeproj \
+            -scheme VideoCacheApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Pack IPA
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -1)
+          echo "APP=$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry VideoCacheApp.ipa Payload
+
+      - name: Fake-sign with ldid (TrollStore compatible)
+        run: |
+          # 解压 IPA，对每个 Mach-O 用 ldid 伪签名（TrollStore 需要 ad-hoc/伪签）
+          rm -rf _sign && mkdir _sign && cd _sign
+          unzip -q ../VideoCacheApp.ipa
+          find Payload/VideoCacheApp.app -type f -perm +111 | while read f; do
+            if file "$f" | grep -q 'Mach-O'; then
+              ldid -S ../VideoCacheApp/VideoCacheApp.entitlements "$f" 2>/dev/null || ldid -S "$f" 2>/dev/null || true
+            fi
+          done
+          # 主可执行文件必须签
+          ldid -S ../VideoCacheApp/VideoCacheApp.entitlements Payload/VideoCacheApp.app/VideoCacheApp || true
+          zip -qry ../VideoCacheApp-signed.ipa Payload
+          cd ..
+          mv VideoCacheApp-signed.ipa VideoCacheApp.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoCacheApp-TrollStore
+          path: VideoCacheApp.ipa
+          if-no-files-found: error
